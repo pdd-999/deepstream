@@ -1,18 +1,20 @@
+from re import I
+import time
 import traceback
 from collections import deque
 from typing import Dict, Optional, Union
+from uuid import uuid4
 
 import gi
 import numpy as np
 import torch
 from func_timeout import func_set_timeout
 from loguru import logger
-import time
 from typing_extensions import Literal
-from webrtc import MediasoupClient
-from uuid import uuid4
-from collections import deque
+
 from utils import print_pad_templates_information
+from webrtc import MediasoupClient
+
 
 class SingleGSTCameraDecoder:
     """
@@ -56,65 +58,55 @@ class SingleGSTCameraDecoder:
 
         self.pipeline = Gst.Pipeline.new(str(self.cam_id))
 
-        self.rtspsrc = Gst.ElementFactory.make('rtspsrc', 'rtspsrc')
-        if not self.rtspsrc:
+        rtspsrc = Gst.ElementFactory.make('rtspsrc', 'rtspsrc')
+        if not rtspsrc:
             logger.error(f"Failed to create rtspsrc element")
-        self.rtspsrc.set_property('location', self.input_uri)
-        self.rtspsrc.set_property('latency', 0)
-        self.rtspsrc.set_property('protocols', "GST_RTSP_LOWER_TRANS_TCP")
-        
-        def on_rtspsrc_pad_added(rtspsrc, pad, *user_data):
-            print(f"Yooooo from on_rtspsrc_pad_added")
-        self.rtspsrc.connect("pad-added", on_rtspsrc_pad_added)
-
-        self.rtp_depay = Gst.ElementFactory.make(f'rtp{self.codec}depay', 'rtp-depay')
-        if not self.rtp_depay:
-            logger.error(f"Failed to create rtpdepay")
-
-        self.decoder = Gst.ElementFactory.make("nvv4l2decoder", "decoder")
-        if not self.decoder:
-            logger.error(f"Failed to create nvv4l2decoder")
-
-        self.converter = Gst.ElementFactory.make("nvvideoconvert", "converter")
-        if not self.converter:
-            logger.error(f"Failed to create nvvideoconvert")
-        self.converter.set_property("interpolation-method", 1)
-
-        self.video_rate = Gst.ElementFactory.make("videorate", "video-rate")
-        if not self.video_rate:
-            logger.error(f"Failed to create videorate")
-
+        rtspsrc.set_property('location', self.input_uri)
+        rtspsrc.set_property('latency', 0)
+        rtspsrc.set_property('protocols', "GST_RTSP_LOWER_TRANS_TCP")
+        rtp_depay = Gst.ElementFactory.make(f'rtp{self.codec}depay', 'rtp-depay')
+        decoder = Gst.ElementFactory.make("nvv4l2decoder", "decoder")
+        converter = Gst.ElementFactory.make("nvvideoconvert", "converter")
+        converter.set_property("interpolation-method", 1)
+        video_rate = Gst.ElementFactory.make("videorate", "video-rate")
         video_rate_caps_string = Gst.Caps.from_string(
             f"video/x-raw(memory:NVMM),width={self.width},height={self.height},framerate={self.fps}/1,format={self.frame_format}"
         )
-        self.video_rate_caps = Gst.ElementFactory.make("capsfilter", "filter")
-        if not self.video_rate_caps:
-            logger.error(f"Failed to create capsfilter")
-
-        self.video_rate_caps.set_property("caps", video_rate_caps_string)
-
-        self.fakesink = Gst.ElementFactory.make("fakesink", str(self.cam_id))
-        if not self.fakesink:
-            logger.error(f"Failed to create fakesink")
+        video_rate_caps = Gst.ElementFactory.make("capsfilter", "filter")
+        video_rate_caps.set_property("caps", video_rate_caps_string)
+        fakesink = Gst.ElementFactory.make("fakesink", self.fake_sink_name)
         
-        logger.info(f"Yooooooooooo")
+        def on_rtspsrc_pad_added(rtspsrc, src_pad, sink_pad):
+            if sink_pad.is_linked():
+                return Gst.PadLinkReturn.OK
+
+            link_res = src_pad.link(sink_pad)
+            if link_res.value_nick == 'ok':
+                return Gst.PadLinkReturn.OK
+            else:
+                raise RuntimeError("Failed to link rtspsrc to rtp-depay")
 
         # Add element to pipeline
-        self.pipeline.add(self.rtspsrc)
-        self.pipeline.add(self.rtp_depay)
-        self.pipeline.add(self.decoder)
-        self.pipeline.add(self.converter)
-        self.pipeline.add(self.video_rate)
-        self.pipeline.add(self.video_rate_caps)
-        self.pipeline.add(self.fakesink)
+        self.pipeline.add(rtspsrc)
+        self.pipeline.add(rtp_depay)
+        self.pipeline.add(decoder)
+        self.pipeline.add(converter)
+        self.pipeline.add(video_rate)
+        self.pipeline.add(video_rate_caps)
+        self.pipeline.add(fakesink)
+
+        # Since rtspsrc contains SOMETIMES pad, it need to be linked dyanmically
+        rtp_depay_sink = rtp_depay.get_static_pad("sink")
+        rtspsrc.connect("pad-added", on_rtspsrc_pad_added, rtp_depay_sink)
 
         # Link element
-        self.rtspsrc.link(self.rtp_depay)
-        self.rtp_depay.link(self.decoder)
-        self.decoder.link(self.converter)
-        self.converter.link(self.video_rate)
-        self.video_rate.link(self.video_rate_caps)
-        self.video_rate_caps.link(self.fakesink)
+        assert rtp_depay.link(decoder)
+        assert decoder.link(converter)
+        assert converter.link(video_rate)
+        assert video_rate.link(video_rate_caps)
+        assert video_rate_caps.link(fakesink)
+
+        logger.info(f"Done adding elements to pipeline")
 
         # decodePipeline = f"""
         #     rtspsrc location="{self.input_uri}" latency=0 protocols="GST_RTSP_LOWER_TRANS_TCP" !
@@ -137,7 +129,6 @@ class SingleGSTCameraDecoder:
         #     logger.error(e)
         #     logger.error(f"######### ERROR WHEN INIT GST PIPELINE for camera {self.cam_id} ##########")
 
-        self.bus = self.pipeline.get_bus()
 
         def on_frame_probe(pad, info):
             """
@@ -147,7 +138,7 @@ class SingleGSTCameraDecoder:
             if not gst_buffer:
                 logger.error(f"Camera {self.cam_id} unable to get GstBuffer")
                 return Gst.PadProbeReturn.OK
-            logger.info(f"Yoooo in on_frame_probe")
+
             # t0 = time.time()
             res = self.decode_frame_buffer_to_tensor(gst_buffer, pad.get_current_caps())
             # logger.debug(f"DECODE FRAME BUFFER TO TENSOR TOOK {(time.time() - t0)*1000}ms")
@@ -161,10 +152,12 @@ class SingleGSTCameraDecoder:
 
             return Gst.PadProbeReturn.OK
 
+        self.bus = self.pipeline.get_bus()
         self.pipeline.get_by_name(self.fake_sink_name).get_static_pad('sink').add_probe(
             Gst.PadProbeType.BUFFER,
             on_frame_probe,
         )
+
 
     def decode_frame_buffer_to_tensor(self, buf, caps) -> torch.Tensor:
         """

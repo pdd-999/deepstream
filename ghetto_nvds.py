@@ -1,8 +1,9 @@
-import torch
-from ctypes import Structure, POINTER, CDLL, addressof, sizeof, memmove, byref
-from ctypes import c_uint, c_int, c_ulong, c_void_p, c_bool
+from ctypes import (CDLL, POINTER, Structure, addressof, byref, c_bool, c_int,
+                    c_uint, c_ulong, c_void_p, memmove, sizeof)
 
-nvbufsurface = CDLL('libnvbufsurface.so')
+import torch
+
+nvbufsurface = CDLL('/usr/lib/aarch64-linux-gnu/tegra/libnvbufsurface.so')
 
 max_planes = 4
 structure_padding = 4

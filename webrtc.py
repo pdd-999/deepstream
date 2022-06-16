@@ -177,8 +177,10 @@ class MediasoupClient:
         return round(random() * 10000000)
 
     async def run(self):
-        self.ssl_context = ssl._create_unverified_context()
-        self._websocket = await websockets.connect(self._uri, subprotocols=['protoo'], ssl=self.ssl_context)
+        # self.ssl_context = ssl._create_unverified_context()
+        # self._websocket = await websockets.connect(self._uri, subprotocols=['protoo'], ssl=self.ssl_context)
+
+        self._websocket = await websockets.connect(self._uri, subprotocols=['protoo'])
 
         if sys.version_info < (3, 7):
             task_run_recv_msg = asyncio.ensure_future(self.recv_msg_task())
